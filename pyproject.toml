@@ -40,7 +40,9 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "mypy>=1.11", "black>=24"]
+# black is pinned exactly: its multiline-string handling changed after 25.x, so a
+# floating version disagrees with the CI format check.
+dev = ["pytest>=7", "mypy>=1.11", "black==26.5.1"]
 
 [project.urls]
 Homepage = "https://fprime.jpl.nasa.gov"
