@@ -10,6 +10,7 @@ The package is layered, and you can enter at whichever level suits the job:
 * :mod:`~fprime_cpp_codegen.comments` -- comment and banner formatting.
 * :mod:`~fprime_cpp_codegen.lines` -- the line model everything is built on.
 * :mod:`~fprime_cpp_codegen.output` -- rendering to text and to disk.
+* :mod:`~fprime_cpp_codegen.validation` -- whole-document checks.
 * :mod:`~fprime_cpp_codegen.formatting` -- optional post-processing through
   ``clang-format``.
 * :mod:`~fprime_cpp_codegen.fprime` -- F Prime conventions.  Import it explicitly;
@@ -52,6 +53,7 @@ from .doc import (
     VOID,
     Class,
     ClassMember,
+    Comment,
     Constructor,
     CppDoc,
     DefaultFileBanner,
@@ -83,6 +85,7 @@ from .lines import (
     wrap_in_scope,
 )
 from .output import WriteResult, collect_cpp_files, doc_files, write_doc
+from .validation import check_document, orphaned_members, unfilled_definitions
 from .writer import (
     Context,
     CppWriter,
@@ -108,6 +111,7 @@ __all__ = [
     "VOID",
     "Class",
     "ClassMember",
+    "Comment",
     "Constructor",
     "CppDoc",
     "DefaultFileBanner",
@@ -155,6 +159,10 @@ __all__ = [
     "collect_cpp_files",
     "doc_files",
     "write_doc",
+    # Validation
+    "check_document",
+    "orphaned_members",
+    "unfilled_definitions",
     # Errors
     "CppCodegenError",
     "ScopeError",

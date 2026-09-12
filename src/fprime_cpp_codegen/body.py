@@ -34,6 +34,7 @@ from .comments import (
     write_comment_body,
     write_doxygen_comment,
 )
+from .doc import Comment
 from .errors import ScopeError, ValidationError
 from .lines import Line, blank, indent_lines
 from .lines import line as _line
@@ -44,7 +45,9 @@ __all__ = ["Body", "Code", "Switch", "stmts"]
 
 #: Anything usable as a run of C++ statements.  ``None`` contributes nothing, so
 #: ``b.add(frag if condition else None)`` needs no branch.  A ``str`` is
-#: margin-stripped and taken verbatim, with no punctuation added.
+#: margin-stripped and taken verbatim, with no punctuation added; pass a
+#: :class:`~fprime_cpp_codegen.lines.Line` instead, or use :meth:`Body.line`, for text
+#: that must survive a leading ``|``.
 Code: TypeAlias = "None | str | Line | Body | Sequence[Code]"
 
 
@@ -216,9 +219,14 @@ class Body:
         """Append one line verbatim."""
         return self._emit([_line(text)])
 
-    def lines(self, text: str) -> Body:
-        """Append a margin-stripped, possibly multi-line block of C++."""
-        return self._emit(_lines(text))
+    def lines(self, text: str, *, margin: str | None = "|") -> Body:
+        """Append a margin-stripped, possibly multi-line block of C++.
+
+        ``margin=None`` turns the stripping off, for text taken from a generator's
+        input that may legitimately begin with the margin character.  :meth:`line`
+        never strips.
+        """
+        return self._emit(_lines(text, margin=margin))
 
     def raw(self, ll: Iterable[Line]) -> Body:
         """Append already-rendered lines."""
@@ -241,19 +249,19 @@ class Body:
     # Comments
     # ------------------------------------------------------------------
 
-    def comment(self, text: str) -> Body:
+    def comment(self, text: Comment) -> Body:
         """Append a ``//`` comment with no leading blank line."""
         return self._emit(write_comment_body(text))
 
-    def spaced_comment(self, text: str) -> Body:
+    def spaced_comment(self, text: Comment) -> Body:
         """Append a ``//`` comment preceded by a blank line."""
         return self._emit(write_comment(text))
 
-    def doc_comment(self, text: str) -> Body:
+    def doc_comment(self, text: Comment) -> Body:
         """Append a ``//!`` doxygen comment."""
         return self._emit(write_doxygen_comment(text))
 
-    def banner(self, text: str) -> Body:
+    def banner(self, text: Comment) -> Body:
         """Append a ruled banner comment."""
         return self._emit(write_banner_comment(text))
 

@@ -34,6 +34,35 @@ class TestSimpleStatements:
         assert text(b) == "a();\nb();\nreturn 0;\n"
 
 
+class TestMarginStripping:
+    """A statement derived from a generator's input may begin with the marker."""
+
+    def test_lines_strips_the_margin_by_default(self) -> None:
+        b = Body()
+        b.lines("|x = a;")
+        assert text(b) == "x = a;\n"
+
+    def test_margin_none_leaves_the_text_alone(self) -> None:
+        b = Body()
+        b.lines("|a\n|= b;", margin=None)
+        assert text(b) == "|a\n|= b;\n"
+
+    def test_line_never_strips(self) -> None:
+        b = Body()
+        b.line("|a")
+        assert text(b) == "|a\n"
+
+    def test_raw_never_strips(self) -> None:
+        b = Body()
+        b.raw([line("|a")])
+        assert text(b) == "|a\n"
+
+    def test_add_strips_a_string_but_not_a_line(self) -> None:
+        b = Body()
+        b.add("|a", line("|b"))
+        assert text(b) == "a\n|b\n"
+
+
 class TestControlFlow:
     def test_if(self) -> None:
         b = Body()

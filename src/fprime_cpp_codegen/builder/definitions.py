@@ -11,12 +11,22 @@ from ..comments import (
     write_doxygen_comment,
     write_doxygen_comment_opt,
 )
-from ..doc import Constructor, Destructor, Function, Lines, Output, Param, Type, as_type
+from ..doc import (
+    Comment,
+    Constructor,
+    Destructor,
+    Function,
+    Lines,
+    Output,
+    Param,
+    Type,
+    as_type,
+)
 from ..errors import ValidationError
 from ..lines import Line, wrap_in_scope
 from ..lines import line as _line
 from .base import _Builder
-from .coercion import _as_body_lines, _as_params, _sv_qualifier
+from .coercion import _as_attributes, _as_body_lines, _as_params, _sv_qualifier
 
 
 class Radix(Enum):
@@ -53,7 +63,7 @@ class FunctionBuilder(_Builder[Function]):
         *,
         ret: Type | str = "void",
         params: Iterable[Param | Sequence[str]] = (),
-        comment: str | None = None,
+        comment: Comment | None = None,
         body: Code = None,
         const: bool = False,
         static: bool = False,
@@ -66,6 +76,8 @@ class FunctionBuilder(_Builder[Function]):
         noexcept: bool = False,
         deleted: bool = False,
         defaulted: bool = False,
+        declaration_only: bool = False,
+        attributes: str | Sequence[str] = (),
         template: str | None = None,
         inline_body: bool = False,
         cpp_file: str | None = None,
@@ -81,6 +93,8 @@ class FunctionBuilder(_Builder[Function]):
         self.noexcept = noexcept
         self.deleted = deleted
         self.defaulted = defaulted
+        self.declaration_only = declaration_only
+        self.attributes = _as_attributes(attributes)
         self.template = template
         self.inline_body = inline_body
         self.cpp_file = cpp_file
@@ -99,7 +113,7 @@ class FunctionBuilder(_Builder[Function]):
         type_name: Type | str,
         name: str,
         *,
-        comment: str | None = None,
+        comment: Comment | None = None,
         default: str | None = None,
     ) -> FunctionBuilder:
         """Append one formal parameter.  Returns self, so calls can be chained."""
@@ -125,6 +139,8 @@ class FunctionBuilder(_Builder[Function]):
             noexcept=self.noexcept,
             deleted=self.deleted,
             defaulted=self.defaulted,
+            declaration_only=self.declaration_only,
+            attributes=self.attributes,
             template=self.template,
             inline_body=self.inline_body,
             cpp_file=self.cpp_file,
@@ -145,13 +161,14 @@ class ConstructorBuilder(_Builder[Constructor]):
         *,
         params: Iterable[Param | Sequence[str]] = (),
         initializers: Iterable[str] = (),
-        comment: str | None = None,
+        comment: Comment | None = None,
         body: Code = None,
         explicit: bool = False,
         constexpr: bool = False,
         noexcept: bool = False,
         deleted: bool = False,
         defaulted: bool = False,
+        declaration_only: bool = False,
         template: str | None = None,
         inline_body: bool = False,
         cpp_file: str | None = None,
@@ -162,6 +179,7 @@ class ConstructorBuilder(_Builder[Constructor]):
         self.noexcept = noexcept
         self.deleted = deleted
         self.defaulted = defaulted
+        self.declaration_only = declaration_only
         self.template = template
         self.inline_body = inline_body
         self.cpp_file = cpp_file
@@ -174,7 +192,7 @@ class ConstructorBuilder(_Builder[Constructor]):
         type_name: Type | str,
         name: str,
         *,
-        comment: str | None = None,
+        comment: Comment | None = None,
         default: str | None = None,
     ) -> ConstructorBuilder:
         """Append one formal parameter."""
@@ -202,6 +220,7 @@ class ConstructorBuilder(_Builder[Constructor]):
             noexcept=self.noexcept,
             deleted=self.deleted,
             defaulted=self.defaulted,
+            declaration_only=self.declaration_only,
             template=self.template,
             inline_body=self.inline_body,
             cpp_file=self.cpp_file,
@@ -220,13 +239,14 @@ class DestructorBuilder(_Builder[Destructor]):
     def __init__(
         self,
         *,
-        comment: str | None = None,
+        comment: Comment | None = None,
         body: Code = None,
         virtual: bool = False,
         override: bool = False,
         noexcept: bool = False,
         deleted: bool = False,
         defaulted: bool = False,
+        declaration_only: bool = False,
         inline_body: bool = False,
         cpp_file: str | None = None,
     ) -> None:
@@ -236,6 +256,7 @@ class DestructorBuilder(_Builder[Destructor]):
         self.noexcept = noexcept
         self.deleted = deleted
         self.defaulted = defaulted
+        self.declaration_only = declaration_only
         self.inline_body = inline_body
         self.cpp_file = cpp_file
         self.body = Body(_as_body_lines(body))
@@ -249,6 +270,7 @@ class DestructorBuilder(_Builder[Destructor]):
             noexcept=self.noexcept,
             deleted=self.deleted,
             defaulted=self.defaulted,
+            declaration_only=self.declaration_only,
             inline_body=self.inline_body,
             cpp_file=self.cpp_file,
         )
@@ -269,7 +291,7 @@ class EnumBuilder(_Builder[Lines]):
         *,
         underlying: str | None = None,
         scoped: bool = False,
-        comment: str | None = None,
+        comment: Comment | None = None,
         output: Output = Output.HPP,
         cpp_file: str | None = None,
         radix: Radix = Radix.DECIMAL,
@@ -323,7 +345,7 @@ class EnumBuilder(_Builder[Lines]):
         name: str,
         value: int | str | None = None,
         *,
-        comment: str | None = None,
+        comment: Comment | None = None,
         radix: Radix | None = None,
     ) -> EnumBuilder:
         """Append one enumerator.

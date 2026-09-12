@@ -12,9 +12,10 @@ translation units without duplicating its declaration.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeAlias, runtime_checkable
 
 from .lines import Line
 
@@ -22,6 +23,7 @@ __all__ = [
     "VOID",
     "Class",
     "ClassMember",
+    "Comment",
     "Constructor",
     "CppDoc",
     "DefaultFileBanner",
@@ -40,6 +42,12 @@ __all__ = [
     "Variable",
     "as_type",
 ]
+
+#: Anything usable as comment text.  A ``str`` is margin-stripped and split on
+#: newlines, so a line of it beginning with ``|`` loses that character; ready-made
+#: lines are taken exactly as they are, which is how text derived from a generator's
+#: input should be passed.  See :func:`fprime_cpp_codegen.lines.strip_margin`.
+Comment: TypeAlias = "str | Sequence[Line]"
 
 
 class Output(Enum):
@@ -120,7 +128,7 @@ class Param:
 
     type: Type
     name: str
-    comment: str | None = None
+    comment: Comment | None = None
     """A doxygen post-comment, rendered after the parameter in the header."""
 
     default: str | None = None
@@ -150,13 +158,14 @@ class Definition:
     positional argument.
 
     ``deleted`` and ``defaulted`` replace the body with ``= delete`` or
-    ``= default``; ``inline_body`` and ``template`` move the definition into the
-    header, since a template's definition must be visible at every use.  In all four
+    ``= default``; ``declaration_only`` leaves the declaration standing with no
+    definition anywhere; ``inline_body`` and ``template`` move the definition into the
+    header, since a template's definition must be visible at every use.  In all five
     cases the source file gets nothing.
     """
 
     body: list[Line] = field(default_factory=list)
-    comment: str | None = None
+    comment: Comment | None = None
     cpp_file: str | None = None
     """Which ``.cpp`` file the definition goes in.  ``None`` means the default."""
 
@@ -164,6 +173,16 @@ class Definition:
     deleted: bool = False
     defaulted: bool = False
     inline_body: bool = False
+
+    declaration_only: bool = False
+    """Declare without defining: the header gets the declaration and no source file
+    gets a definition.
+
+    For a symbol something else provides -- another translation unit, a hand-written
+    file, a linker script.  Without it, a definition left unfilled emits an empty
+    out-of-line body instead, which is valid C++ with different linkage rather than an
+    error; see also ``strict`` on
+    :class:`~fprime_cpp_codegen.builder.CppDocBuilder`."""
 
     template: str | None = None
     """A template parameter list without the keyword, e.g. ``"typename T"``.
@@ -176,7 +195,7 @@ class Definition:
     @property
     def has_definition(self) -> bool:
         """Whether there is a body to write at all."""
-        return not (self.deleted or self.defaulted)
+        return not (self.deleted or self.defaulted or self.declaration_only)
 
 
 @dataclass(frozen=True)
@@ -192,6 +211,14 @@ class Function(Definition):
     const: bool = False
     constexpr: bool = False
     inline: bool = False
+
+    attributes: Sequence[str] = ()
+    """Declaration attributes, e.g. ``['__attribute__((visibility("default")))']`` or
+    ``["[[nodiscard]]"]``, written verbatim at the head of the declaration.
+
+    The header declaration carries them; the out-of-line definition does not, which is
+    where both GCC's ``__attribute__`` and standard ``[[...]]`` attributes want to
+    be."""
 
     @property
     def defined_in_header(self) -> bool:
@@ -235,7 +262,7 @@ class Class:
     Multiple bases go in one comma-separated string."""
 
     members: list[ClassMember] = field(default_factory=list)
-    comment: str | None = None
+    comment: Comment | None = None
     final: bool = False
     template: str | None = None
     """A template parameter list without the keyword, e.g. ``"typename T"``.  A
@@ -244,6 +271,14 @@ class Class:
 
     struct: bool = False
     """Emit ``struct``, making members public by default."""
+
+    attributes: Sequence[str] = ()
+    """Declaration attributes, e.g. ``['__attribute__((visibility("default")))']``,
+    written verbatim between the ``class``/``struct`` keyword and the name.
+
+    That position is the one that leaves the name alone: an attribute folded into
+    :attr:`name` would also corrupt the constructor and destructor names and the
+    ``MyClass ::`` qualifier on every out-of-line definition."""
 
 
 @dataclass(frozen=True)
@@ -268,7 +303,7 @@ class Variable:
     array: str | None = None
     """An array extent, without brackets, e.g. ``"SIZE"`` for ``m_data[SIZE]``."""
 
-    comment: str | None = None
+    comment: Comment | None = None
     static: bool = False
     const: bool = False
     constexpr: bool = False

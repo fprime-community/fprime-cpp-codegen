@@ -85,6 +85,16 @@ def _terminator(d: Definition, *, pure_virtual: bool = False) -> str:
         raise ValidationError(
             f"this {what} is pure virtual, so it cannot also be deleted or defaulted"
         )
+    if d.declaration_only and d.body:
+        raise ValidationError(
+            f"this {what} is declaration-only, so it cannot also have a body; drop "
+            "one of the two"
+        )
+    if d.declaration_only and (d.deleted or d.defaulted):
+        raise ValidationError(
+            f"this {what} is declaration-only and also deleted or defaulted; both "
+            "leave it undefined, so pick one"
+        )
     if d.deleted:
         return " = delete;"
     if d.defaulted:
@@ -102,6 +112,14 @@ def _namespace_opening(name: str) -> str:
 def _template_lines(params: str | None) -> list[Line]:
     """The ``template <...>`` line introducing a templated declaration."""
     return lines(f"template <{params}>") if params is not None else []
+
+
+def _attribute_prefix(attributes: Sequence[str]) -> str:
+    """The attributes of a declaration, as a space-terminated prefix.
+
+    Empty when there are none, so it can be concatenated unconditionally.
+    """
+    return "".join(f"{a} " for a in attributes)
 
 
 def variable_defined_in_source(v: Variable, *, in_class: bool) -> bool:
@@ -218,7 +236,16 @@ class Context:
 
 
 class DocWriter(ABC):
-    """Dispatch for a document walk.  Subclass to render something new."""
+    """Dispatch for a document walk.
+
+    Subclass :class:`HppWriter` or :class:`CppWriter` to change how something renders
+    and pass the instance to any of the output paths -- ``writer=`` on
+    :func:`render_hpp` and :func:`render_cpp`, ``hpp_writer=``/``cpp_writer=`` on
+    :func:`~fprime_cpp_codegen.output.doc_files`,
+    :func:`~fprime_cpp_codegen.output.write_doc` and
+    :class:`~fprime_cpp_codegen.builder.CppDocBuilder`.  Subclass this directly only
+    to render a document into something that is not C++ at all.
+    """
 
     def visit_member(self, ctx: Context, member: Member) -> list[Line]:
         """Dispatch a document- or namespace-scope member."""
@@ -406,9 +433,14 @@ class HppWriter(DocWriter):
     # ------------------------------------------------------------------
 
     def visit_class(self, ctx: Context, c: Class) -> list[Line]:
-        """Render a class declaration and everything in it."""
-        kind = "struct" if c.struct else "class"
-        head = f"{kind} {c.name} final" if c.final else f"{kind} {c.name}"
+        """Render a class declaration and everything in it.
+
+        Attributes sit between the keyword and the name, which is where a
+        ``visibility`` or ``dllexport`` attribute has to go and the only place that
+        leaves the class's own name untouched.
+        """
+        kind = f"{'struct' if c.struct else 'class'} {_attribute_prefix(c.attributes)}"
+        head = f"{kind}{c.name} final" if c.final else f"{kind}{c.name}"
         if c.superclass_decls is not None:
             open_lines = [
                 line(f"{head} :"),
@@ -463,9 +495,14 @@ class HppWriter(DocWriter):
         return [*write_doxygen_comment_opt(dtor.comment), *tail]
 
     def visit_function(self, ctx: Context, fn: Function) -> list[Line]:
-        """Render a function declaration, with its body if that belongs here."""
+        """Render a function declaration, with its body if that belongs here.
+
+        Attributes lead the whole declaration, ahead of ``static`` and the rest: that
+        position is the one a standard ``[[...]]`` attribute requires, and one GCC's
+        ``__attribute__`` accepts.
+        """
         pure = fn.sv is SVQualifier.PURE_VIRTUAL
-        lead = ""
+        lead = _attribute_prefix(fn.attributes)
         if fn.sv is SVQualifier.STATIC:
             lead += "static "
         elif fn.sv in (SVQualifier.VIRTUAL, SVQualifier.PURE_VIRTUAL):
@@ -763,25 +800,36 @@ class CppWriter(DocWriter):
         return [left_align_directive(l) for l in out]
 
 
-def hpp_lines(doc: CppDoc) -> list[Line]:
-    """Render ``doc``'s header as lines."""
-    return HppWriter().visit_doc(doc)
+def hpp_lines(doc: CppDoc, *, writer: HppWriter | None = None) -> list[Line]:
+    """Render ``doc``'s header as lines.
+
+    ``writer`` substitutes an :class:`HppWriter` subclass for the default one, so a
+    generator that overrides part of the rendering keeps every convenience path above
+    this one.  Writers hold no per-document state, so one instance can render any
+    number of documents.
+    """
+    return (writer if writer is not None else HppWriter()).visit_doc(doc)
 
 
-def cpp_lines(doc: CppDoc, cpp_file: str | None = None) -> list[Line]:
+def cpp_lines(
+    doc: CppDoc, cpp_file: str | None = None, *, writer: CppWriter | None = None
+) -> list[Line]:
     """Render one of ``doc``'s source files as lines.
 
     ``cpp_file`` is a base name without extension; ``None`` selects the document's
-    default source file.
+    default source file.  ``writer`` substitutes a :class:`CppWriter` subclass for the
+    default one.
     """
-    return CppWriter().visit_doc(doc, cpp_file)
+    return (writer if writer is not None else CppWriter()).visit_doc(doc, cpp_file)
 
 
-def render_hpp(doc: CppDoc) -> str:
+def render_hpp(doc: CppDoc, *, writer: HppWriter | None = None) -> str:
     """Render ``doc``'s header as file text."""
-    return render(hpp_lines(doc))
+    return render(hpp_lines(doc, writer=writer))
 
 
-def render_cpp(doc: CppDoc, cpp_file: str | None = None) -> str:
+def render_cpp(
+    doc: CppDoc, cpp_file: str | None = None, *, writer: CppWriter | None = None
+) -> str:
     """Render one of ``doc``'s source files as file text."""
-    return render(cpp_lines(doc, cpp_file))
+    return render(cpp_lines(doc, cpp_file, writer=writer))
