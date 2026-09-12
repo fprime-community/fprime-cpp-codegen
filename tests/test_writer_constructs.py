@@ -25,8 +25,15 @@ from fprime_cpp_codegen.doc import (
     Type,
 )
 from fprime_cpp_codegen.errors import CppCodegenError, ValidationError
-from fprime_cpp_codegen.lines import line, lines
-from fprime_cpp_codegen.writer import render_cpp, render_hpp
+from fprime_cpp_codegen.lines import Line, line, lines
+from fprime_cpp_codegen.writer import (
+    CppWriter,
+    HppWriter,
+    cpp_lines,
+    hpp_lines,
+    render_cpp,
+    render_hpp,
+)
 
 from .conftest import assert_compiles
 
@@ -277,6 +284,176 @@ class TestClasses:
     def test_namespace_inside_a_class_is_rejected(self) -> None:
         with pytest.raises(CppCodegenError, match="may not be declared inside a class"):
             render_hpp(in_class(Namespace("N")))
+
+
+class TestAttributes:
+    """Declaration attributes: the shape a shared object's exported symbols need.
+
+    ``VISIBLE`` here stands in for
+    ``__attribute__((visibility("default")))``, which is what a pybind11 module has to
+    put on a class for its symbols to be findable in the ``.so``.
+    """
+
+    VISIBLE = '__attribute__((visibility("default")))'
+
+    def test_a_class_carries_them_between_the_keyword_and_the_name(self) -> None:
+        hpp = render_hpp(doc_with(Class("C", attributes=[self.VISIBLE])))
+        assert f"class {self.VISIBLE} C {{" in hpp
+
+    def test_a_struct_carries_them_too(self) -> None:
+        hpp = render_hpp(doc_with(Class("S", struct=True, attributes=["[[foo]]"])))
+        assert "struct [[foo]] S {" in hpp
+
+    def test_they_precede_final_and_the_base_list(self) -> None:
+        hpp = render_hpp(
+            doc_with(
+                Class(
+                    "C",
+                    superclass_decls="public A",
+                    final=True,
+                    attributes=[self.VISIBLE],
+                )
+            )
+        )
+        assert f"class {self.VISIBLE} C final :" in hpp
+
+    def test_several_attributes_are_space_separated(self) -> None:
+        hpp = render_hpp(doc_with(Class("C", attributes=["[[a]]", "[[b]]"])))
+        assert "class [[a]] [[b]] C {" in hpp
+
+    def test_no_attributes_changes_nothing(self) -> None:
+        assert "class C {" in render_hpp(doc_with(Class("C")))
+
+    def test_the_class_name_is_untouched_in_the_source_file(self) -> None:
+        # The reason attributes are a field rather than something to fold into the
+        # name: these three spellings all have to stay clean.
+        doc = doc_with(
+            Class(
+                "C",
+                attributes=[self.VISIBLE],
+                members=[
+                    Constructor(body=[line("x();")]),
+                    Destructor(body=[line("y();")]),
+                    Function("f", body=[line("z();")]),
+                ],
+            )
+        )
+        cpp = render_cpp(doc)
+        assert "C ::" in cpp
+        assert "  C()" in cpp
+        assert "  ~C()" in cpp
+        assert self.VISIBLE not in cpp
+
+    def test_a_function_carries_them_at_the_head_of_the_declaration(self) -> None:
+        hpp = render_hpp(
+            doc_with(Function("f", ret_type=Type("U32"), attributes=["[[nodiscard]]"]))
+        )
+        assert "[[nodiscard]] U32 f();" in hpp
+
+    def test_a_function_keeps_them_ahead_of_static_and_constexpr(self) -> None:
+        hpp = render_hpp(
+            in_class(
+                Function(
+                    "f",
+                    ret_type=Type("U32"),
+                    sv=SVQualifier.STATIC,
+                    constexpr=True,
+                    body=[line("return 0;")],
+                    attributes=["[[nodiscard]]"],
+                )
+            )
+        )
+        assert "[[nodiscard]] static constexpr U32 f()" in hpp
+
+    def test_a_functions_out_of_line_definition_does_not_repeat_them(self) -> None:
+        # Both GCC's __attribute__ and standard [[...]] belong on the declaration.
+        doc = doc_with(Function("f", body=[line("x();")], attributes=["[[nodiscard]]"]))
+        assert "[[nodiscard]]" not in render_cpp(doc)
+
+    def test_an_exported_class_compiles(self) -> None:
+        doc = doc_with(
+            Lines(lines('#include "T.hpp"'), Output.CPP),
+            Class(
+                "C",
+                attributes=[self.VISIBLE],
+                members=[
+                    Lines(write_access_tag("public"), Output.HPP),
+                    Constructor(body=[]),
+                    Destructor(body=[]),
+                    Function("f", ret_type=Type("int"), body=[line("return 0;")]),
+                ],
+            ),
+        )
+        assert_compiles({"T.hpp": render_hpp(doc), "T.cpp": render_cpp(doc)})
+
+
+class TestDeclarationOnlyRendering:
+    def test_the_header_declares_it(self) -> None:
+        assert "void f();" in render_hpp(doc_with(Function("f", declaration_only=True)))
+
+    def test_no_source_file_defines_it(self) -> None:
+        cpp = render_cpp(doc_with(Function("f", declaration_only=True)))
+        assert "f()" not in cpp
+
+    def test_a_class_member_is_declared_and_not_defined(self) -> None:
+        doc = in_class(Function("f", declaration_only=True))
+        assert "void f();" in render_hpp(doc)
+        assert "C ::" not in render_cpp(doc)
+
+    def test_a_declaration_only_constructor_and_destructor(self) -> None:
+        doc = in_class(Constructor(declaration_only=True), Destructor())
+        hpp, cpp = render_hpp(doc), render_cpp(doc)
+        assert "C();" in hpp and "~C()" in hpp
+        assert "  C()" not in cpp
+        assert "~C()" in cpp
+
+    def test_a_body_alongside_it_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="declaration-only"):
+            render_hpp(
+                doc_with(Function("f", declaration_only=True, body=[line("x();")]))
+            )
+
+    def test_deleted_alongside_it_is_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="pick one"):
+            render_hpp(in_class(Function("f", declaration_only=True, deleted=True)))
+
+
+class TestWriterSubstitution:
+    """A ``DocWriter`` subclass must reach every rendering entry point.
+
+    Overriding one piece of the rendering should not cost the caller ``write()``, its
+    directory creation, its mtime handling or its formatter.
+    """
+
+    class LoudHpp(HppWriter):
+        def open_include_guard(self, guard: str) -> list[Line]:
+            return [*super().open_include_guard(guard), line("// LOUD")]
+
+    class LoudCpp(CppWriter):
+        def visit_doc(self, doc: CppDoc, cpp_file: str | None = None) -> list[Line]:
+            return [line("// LOUD"), *super().visit_doc(doc, cpp_file)]
+
+    def test_hpp_lines_takes_a_writer(self) -> None:
+        out = hpp_lines(doc_with(Class("C")), writer=self.LoudHpp())
+        assert any(l.string == "// LOUD" for l in out)
+
+    def test_cpp_lines_takes_a_writer(self) -> None:
+        out = cpp_lines(doc_with(Class("C")), writer=self.LoudCpp())
+        assert out[0].string == "// LOUD"
+
+    def test_render_hpp_takes_a_writer(self) -> None:
+        assert "// LOUD" in render_hpp(doc_with(Class("C")), writer=self.LoudHpp())
+
+    def test_render_cpp_takes_a_writer(self) -> None:
+        assert "// LOUD" in render_cpp(doc_with(Class("C")), writer=self.LoudCpp())
+
+    def test_render_cpp_passes_the_file_through_to_the_writer(self) -> None:
+        doc = in_class(Function("f", body=[line("a();")], cpp_file="Extra"))
+        text = render_cpp(doc, "Extra", writer=self.LoudCpp())
+        assert "// LOUD" in text and "a();" in text
+
+    def test_the_default_writer_is_still_used_when_none_is_given(self) -> None:
+        assert "// LOUD" not in render_hpp(doc_with(Class("C")))
 
 
 class TestFreeFunctions:

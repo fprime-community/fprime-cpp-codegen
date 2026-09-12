@@ -10,7 +10,8 @@ from ..doc import CppDoc, FileBanner, HppFile
 from ..errors import ValidationError
 from ..formatting import Formatter
 from ..output import WriteResult, doc_files, write_doc
-from ..writer import render_cpp, render_hpp
+from ..validation import check_document
+from ..writer import CppWriter, HppWriter, render_cpp, render_hpp
 from .base import _DocContext
 from .scopes import _MemberScope
 
@@ -28,8 +29,13 @@ class CppDocBuilder(_MemberScope[CppDoc]):
         tool_name: str | None = None,
         file_banner: FileBanner | None = None,
         formatter: Formatter | None = None,
+        hpp_writer: HppWriter | None = None,
+        cpp_writer: CppWriter | None = None,
         hpp_extension: str = "hpp",
         cpp_extension: str = "cpp",
+        emit_hpp: bool = True,
+        emit_cpp: bool = True,
+        strict: bool = False,
     ) -> None:
         """Start a document whose files are named after ``file_base``.
 
@@ -39,7 +45,20 @@ class CppDocBuilder(_MemberScope[CppDoc]):
 
         ``formatter`` post-processes every file this document renders; see
         :mod:`fprime_cpp_codegen.formatting`.  Any render or write call can override
-        it, but cannot switch it off.
+        it, but cannot switch it off.  ``hpp_writer`` and ``cpp_writer`` work the same
+        way, substituting a :class:`~fprime_cpp_codegen.writer.DocWriter` subclass for
+        the default rendering.
+
+        ``emit_hpp=False`` or ``emit_cpp=False`` makes this a one-file document, which
+        a translation unit holding only a module-initialisation block wants.  Members
+        that would then have nowhere to go raise :class:`ValidationError` when the
+        document is built, rather than disappearing.
+
+        ``strict=True`` additionally rejects any definition that needs a body and has
+        none, which would otherwise render as an empty out-of-line definition -- valid
+        C++, and so easy for a generator to emit by accident.  Say
+        ``declaration_only=True`` to declare without defining, or ``body=""`` for a
+        definition that is deliberately empty.
         """
         super().__init__(_DocContext())
         if not file_base:
@@ -51,6 +70,23 @@ class CppDocBuilder(_MemberScope[CppDoc]):
         self.tool_name = tool_name
         self.formatter = formatter
         """Applied to every file this document renders, unless a call overrides it."""
+
+        self.hpp_writer = hpp_writer
+        """Renders the header, unless a call overrides it.  ``None`` uses
+        :class:`~fprime_cpp_codegen.writer.HppWriter`."""
+
+        self.cpp_writer = cpp_writer
+        """Renders the source files, unless a call overrides it.  ``None`` uses
+        :class:`~fprime_cpp_codegen.writer.CppWriter`."""
+
+        self.emit_hpp = emit_hpp
+        """Whether this document produces a header at all."""
+
+        self.emit_cpp = emit_cpp
+        """Whether this document produces any source file at all."""
+
+        self.strict = strict
+        """Whether :meth:`build` rejects a definition that needs a body and has none."""
 
         self.file_banner = file_banner
         """Overrides the ``\\title``/``\\author``/``\\brief`` block atop each file.
@@ -73,7 +109,8 @@ class CppDocBuilder(_MemberScope[CppDoc]):
         return f"{self.file_base}.{self.cpp_extension}"
 
     def build(self) -> CppDoc:
-        return CppDoc(
+        """Produce the IR, checking it against ``emit_hpp``/``emit_cpp``/``strict``."""
+        doc = CppDoc(
             description=self.description,
             hpp_file=HppFile(self.hpp_name, self.include_guard),
             cpp_file_name=self.cpp_name,
@@ -81,23 +118,55 @@ class CppDocBuilder(_MemberScope[CppDoc]):
             tool_name=self.tool_name,
             banner=self.file_banner,
         )
+        check_document(
+            doc,
+            emit_hpp=self.emit_hpp,
+            emit_cpp=self.emit_cpp,
+            strict=self.strict,
+        )
+        return doc
 
     # -- output -------------------------------------------------------
 
     def _formatter(self, override: Formatter | None) -> Formatter | None:
         return override if override is not None else self.formatter
 
-    def render_hpp(self, *, formatter: Formatter | None = None) -> str:
+    def _hpp_writer(self, override: HppWriter | None) -> HppWriter | None:
+        return override if override is not None else self.hpp_writer
+
+    def _cpp_writer(self, override: CppWriter | None) -> CppWriter | None:
+        return override if override is not None else self.cpp_writer
+
+    def _require_emitted(self, which: str) -> None:
+        """Reject rendering a file this document was told not to produce."""
+        if not (self.emit_hpp if which == "hpp" else self.emit_cpp):
+            raise ValidationError(
+                f"this document was built with emit_{which}=False, so it has no "
+                f"{which} file to render"
+            )
+
+    def render_hpp(
+        self,
+        *,
+        formatter: Formatter | None = None,
+        writer: HppWriter | None = None,
+    ) -> str:
         """Render the header as text."""
-        text = render_hpp(self.build())
+        self._require_emitted("hpp")
+        text = render_hpp(self.build(), writer=self._hpp_writer(writer))
         chosen = self._formatter(formatter)
         return chosen(text, self.hpp_name) if chosen else text
 
     def render_cpp(
-        self, cpp_file: str | None = None, *, formatter: Formatter | None = None
+        self,
+        cpp_file: str | None = None,
+        *,
+        formatter: Formatter | None = None,
+        writer: CppWriter | None = None,
     ) -> str:
         """Render one source file as text.  ``None`` selects the default one."""
-        text = render_cpp(self.build(), cpp_file)
+        self._require_emitted("cpp")
+        text = render_cpp(self.build(), cpp_file, writer=self._cpp_writer(writer))
         chosen = self._formatter(formatter)
         if not chosen:
             return text
@@ -109,9 +178,19 @@ class CppDocBuilder(_MemberScope[CppDoc]):
         cpp_files: Sequence[str] | None = None,
         *,
         formatter: Formatter | None = None,
+        hpp_writer: HppWriter | None = None,
+        cpp_writer: CppWriter | None = None,
     ) -> dict[str, str]:
         """Render every file this document owns, as a name-to-text mapping."""
-        return doc_files(self.build(), cpp_files, formatter=self._formatter(formatter))
+        return doc_files(
+            self.build(),
+            cpp_files,
+            formatter=self._formatter(formatter),
+            hpp_writer=self._hpp_writer(hpp_writer),
+            cpp_writer=self._cpp_writer(cpp_writer),
+            emit_hpp=self.emit_hpp,
+            emit_cpp=self.emit_cpp,
+        )
 
     def write(
         self,
@@ -119,6 +198,8 @@ class CppDocBuilder(_MemberScope[CppDoc]):
         cpp_files: Sequence[str] | None = None,
         *,
         formatter: Formatter | None = None,
+        hpp_writer: HppWriter | None = None,
+        cpp_writer: CppWriter | None = None,
         skip_unchanged: bool = True,
         encoding: str = "utf-8",
     ) -> WriteResult:
@@ -131,6 +212,10 @@ class CppDocBuilder(_MemberScope[CppDoc]):
             directory,
             cpp_files,
             formatter=self._formatter(formatter),
+            hpp_writer=self._hpp_writer(hpp_writer),
+            cpp_writer=self._cpp_writer(cpp_writer),
+            emit_hpp=self.emit_hpp,
+            emit_cpp=self.emit_cpp,
             skip_unchanged=skip_unchanged,
             encoding=encoding,
         )

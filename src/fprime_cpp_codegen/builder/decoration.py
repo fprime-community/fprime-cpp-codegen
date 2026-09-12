@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from ..comments import write_access_tag, write_banner_comment
 from ..doc import (
     Class,
+    Comment,
     Constructor,
     Destructor,
     Function,
@@ -90,7 +91,7 @@ class _SectionBanner(_Builder[Lines]):
     definitions went.
     """
 
-    def __init__(self, comment: str) -> None:
+    def __init__(self, comment: Comment) -> None:
         self.comment = comment
         self.members: list[object] = []
 
@@ -179,7 +180,7 @@ class AccessSection:
     its label and banner back out again.
     """
 
-    def __init__(self, scope: ClassBuilder, tag: str, comment: str | None) -> None:
+    def __init__(self, scope: ClassBuilder, tag: str, comment: Comment | None) -> None:
         self._scope = scope
         self._count = 1
         scope._add(Lines(write_access_tag(tag), Output.HPP))

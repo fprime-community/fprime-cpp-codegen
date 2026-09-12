@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
 from fprime_cpp_codegen.comments import (
     BANNER_RULE,
     add_comment_prefix,
     add_param_comment,
+    comment_lines,
+    is_directive,
     left_align_directive,
     write_access_tag,
     write_banner,
@@ -19,7 +23,7 @@ from fprime_cpp_codegen.comments import (
     write_function_body,
 )
 from fprime_cpp_codegen.doc import DefaultFileBanner
-from fprime_cpp_codegen.lines import Line, line
+from fprime_cpp_codegen.lines import Line, line, lines
 
 
 def strings(ll: list[Line]) -> list[str]:
@@ -100,6 +104,80 @@ class TestDirectives:
 
     def test_ordinary_line_keeps_its_indentation(self) -> None:
         assert left_align_directive(Line("x();", 8)) == Line("x();", 8)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "#include <cstdio>",
+            '#include "A.hpp"',
+            "#ifndef A_HPP",
+            "#define A_HPP",
+            "#endif",
+            "#pragma once",
+            "# include <cstdio>",
+            "#\tif 0",
+        ],
+    )
+    def test_recognised_directives(self, text: str) -> None:
+        assert is_directive(text)
+        assert left_align_directive(Line(text, 8)).indent == 0
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # A markdown heading in a docstring being bound to C++, which used to be
+            # silently re-indented along with the real directives.
+            "# Heading",
+            "## Sub-heading",
+            "#1 in the charts",
+            "#",
+            "# TODO",
+            "x #include y",
+            "",
+        ],
+    )
+    def test_content_that_merely_starts_with_a_hash(self, text: str) -> None:
+        assert not is_directive(text)
+        assert left_align_directive(Line(text, 8)) == Line(text, 8)
+
+    def test_indentation_carried_in_the_string_is_the_escape(self) -> None:
+        # A real directive that must keep its column puts the column in the text.
+        assert left_align_directive(Line("    #include <x>")) == Line(
+            "    #include <x>"
+        )
+
+
+class TestCommentsFromLines:
+    """Every ``comment=`` also takes ready-made lines, which are not margin-stripped."""
+
+    def test_a_string_is_margin_stripped(self) -> None:
+        assert strings(write_doxygen_comment("|a")) == ["", "//! a"]
+
+    def test_lines_are_taken_exactly_as_they_are(self) -> None:
+        assert strings(write_doxygen_comment([Line("|a")])) == ["", "//! |a"]
+
+    def test_lines_bypass_stripping_in_a_post_comment(self) -> None:
+        assert strings(write_doxygen_post_comment([Line("|x")])) == ["//!< |x"]
+
+    def test_lines_bypass_stripping_in_a_plain_comment(self) -> None:
+        assert strings(write_comment_body([Line("|x"), Line("|y")])) == [
+            "// |x",
+            "// |y",
+        ]
+
+    def test_lines_bypass_stripping_in_a_banner(self) -> None:
+        assert strings(write_banner_comment([Line("|x")]))[2] == "// |x"
+
+    def test_lines_bypass_stripping_in_a_param_comment(self) -> None:
+        assert strings(add_param_comment("U32 x,", [Line("|c")])) == ["U32 x, //!< |c"]
+
+    def test_comment_lines_coerces_both_shapes(self) -> None:
+        assert comment_lines("a\nb") == [Line("a"), Line("b")]
+        assert comment_lines((Line("a"),)) == [Line("a")]
+
+    def test_multi_line_derived_text_keeps_every_marker(self) -> None:
+        derived = lines("|a\n|b", margin=None)
+        assert strings(write_doxygen_comment(derived)) == ["", "//! |a", "//! |b"]
 
 
 class TestBanner:

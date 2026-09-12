@@ -13,7 +13,8 @@ from pathlib import Path
 
 from .doc import Class, ClassMember, CppDoc, Member, Namespace
 from .formatting import Formatter
-from .writer import render_cpp, render_hpp
+from .validation import check_document
+from .writer import CppWriter, HppWriter, render_cpp, render_hpp
 
 __all__ = ["WriteResult", "collect_cpp_files", "doc_files", "write_doc"]
 
@@ -61,25 +62,39 @@ def doc_files(
     cpp_files: Sequence[str] | None = None,
     *,
     formatter: Formatter | None = None,
+    hpp_writer: HppWriter | None = None,
+    cpp_writer: CppWriter | None = None,
+    emit_hpp: bool = True,
+    emit_cpp: bool = True,
 ) -> dict[str, str]:
     """Render a document to a mapping of file name to text.
 
-    Always produces the header and the document's default source file.
-    ``cpp_files`` names additional source files by base name, without extension;
-    each gets only the definitions assigned to it.  Left as ``None``, the
-    supplemental files are discovered from the document itself.
+    Produces the header and the document's default source file.  ``cpp_files`` names
+    additional source files by base name, without extension; each gets only the
+    definitions assigned to it.  Left as ``None``, the supplemental files are
+    discovered from the document itself.
 
     ``formatter`` post-processes each file, receiving its text and its name; see
-    :mod:`fprime_cpp_codegen.formatting`.
+    :mod:`fprime_cpp_codegen.formatting`.  ``hpp_writer`` and ``cpp_writer``
+    substitute :class:`~fprime_cpp_codegen.writer.DocWriter` subclasses for the
+    default writers.
+
+    ``emit_hpp=False`` or ``emit_cpp=False`` drops that half of the output, for a
+    document that is only ever one file -- a translation unit holding nothing but a
+    module-initialisation block, say.  Anything the dropped file was the only home
+    for raises :class:`~fprime_cpp_codegen.errors.ValidationError` rather than
+    disappearing; see :func:`fprime_cpp_codegen.validation.orphaned_members`.
     """
-    if cpp_files is None:
-        cpp_files = collect_cpp_files(doc)
-    out = {
-        doc.hpp_file.name: render_hpp(doc),
-        doc.cpp_file_name: render_cpp(doc),
-    }
-    for base in cpp_files:
-        out[f"{base}.cpp"] = render_cpp(doc, base)
+    check_document(doc, emit_hpp=emit_hpp, emit_cpp=emit_cpp)
+    out: dict[str, str] = {}
+    if emit_hpp:
+        out[doc.hpp_file.name] = render_hpp(doc, writer=hpp_writer)
+    if emit_cpp:
+        if cpp_files is None:
+            cpp_files = collect_cpp_files(doc)
+        out[doc.cpp_file_name] = render_cpp(doc, writer=cpp_writer)
+        for base in cpp_files:
+            out[f"{base}.cpp"] = render_cpp(doc, base, writer=cpp_writer)
     if formatter is not None:
         out = {name: formatter(text, name) for name, text in out.items()}
     return out
@@ -91,22 +106,39 @@ def write_doc(
     cpp_files: Sequence[str] | None = None,
     *,
     formatter: Formatter | None = None,
+    hpp_writer: HppWriter | None = None,
+    cpp_writer: CppWriter | None = None,
+    emit_hpp: bool = True,
+    emit_cpp: bool = True,
     skip_unchanged: bool = True,
     encoding: str = "utf-8",
 ) -> WriteResult:
     """Write a document's header and source files into ``directory``.
 
     The directory is created if it does not exist.  See :func:`doc_files` for how
-    ``cpp_files`` selects supplemental source files and what ``formatter`` does.
+    ``cpp_files`` selects supplemental source files and what ``formatter``, the two
+    writers and the two ``emit_`` flags do.
 
     Formatting happens before the unchanged check, so a file already holding the
     formatted text is still left alone.
+
+    Everything is rendered before anything is written, so a document that fails
+    validation leaves the directory as it found it.
     """
+    rendered = doc_files(
+        doc,
+        cpp_files,
+        formatter=formatter,
+        hpp_writer=hpp_writer,
+        cpp_writer=cpp_writer,
+        emit_hpp=emit_hpp,
+        emit_cpp=emit_cpp,
+    )
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     unchanged: list[Path] = []
-    for name, text in doc_files(doc, cpp_files, formatter=formatter).items():
+    for name, text in rendered.items():
         path = root / name
         if (
             skip_unchanged

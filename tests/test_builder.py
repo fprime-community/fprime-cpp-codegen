@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from fprime_cpp_codegen import (
@@ -17,8 +19,11 @@ from fprime_cpp_codegen import (
     Variable,
     as_type,
     line,
+    lines,
 )
 from fprime_cpp_codegen.builder import ClassBuilder
+from fprime_cpp_codegen.lines import Line
+from fprime_cpp_codegen.writer import HppWriter
 
 from .conftest import assert_compiles
 
@@ -26,6 +31,13 @@ from .conftest import assert_compiles
 def doc(**kwargs: object) -> CppDocBuilder:
     kwargs.setdefault("description", "test")
     return CppDocBuilder("T", **kwargs)  # type: ignore[arg-type]
+
+
+class MarkedHpp(HppWriter):
+    """An HppWriter subclass that leaves a visible trace, for the writer= tests."""
+
+    def close_include_guard(self) -> list[Line]:
+        return [line("// MARKED"), *super().close_include_guard()]
 
 
 class TestDocumentSetup:
@@ -248,12 +260,12 @@ class TestNamespaces:
         assert "namespace {" in d.render_cpp()
 
     def test_class_only_qualifiers_are_rejected_on_a_free_function(self) -> None:
+        # These are absent from the signature rather than validated inside it, so a
+        # type checker rejects them too instead of only the run.
         d = doc()
         for bad in ("const", "virtual", "pure_virtual", "override", "final"):
-            with pytest.raises(
-                ValidationError, match="only means something for a member"
-            ):
-                d.function("f", **{bad: True})
+            with pytest.raises(TypeError, match=f"unexpected keyword argument '{bad}'"):
+                d.function("f", **{bad: True})  # type: ignore[arg-type]
 
 
 class TestClassMembers:
@@ -671,6 +683,152 @@ def test_a_realistic_document_compiles() -> None:
                 c.var("U32", "m_capacity", const=True)
 
     assert_compiles(d.files())
+
+
+class TestAttributes:
+    """The builder side of declaration attributes."""
+
+    VISIBLE = '__attribute__((visibility("default")))'
+
+    def test_a_single_string_is_one_attribute_not_a_sequence_of_letters(self) -> None:
+        d = doc()
+        d.class_("C", attributes=self.VISIBLE)
+        assert f"class {self.VISIBLE} C {{" in d.render_hpp()
+
+    def test_a_sequence_is_taken_in_order(self) -> None:
+        d = doc()
+        d.class_("C", attributes=["[[a]]", "[[b]]"])
+        assert "class [[a]] [[b]] C {" in d.render_hpp()
+
+    def test_a_struct_takes_them(self) -> None:
+        d = doc()
+        d.struct_("S", attributes="[[a]]")
+        assert "struct [[a]] S {" in d.render_hpp()
+
+    def test_a_nested_class_takes_them(self) -> None:
+        d = doc()
+        with d.class_("Outer") as cls:
+            cls.class_("Inner", attributes="[[a]]")
+        assert "class [[a]] Inner {" in d.render_hpp()
+
+    def test_a_free_function_takes_them(self) -> None:
+        d = doc()
+        d.function("f", attributes="[[nodiscard]]", ret="U32", body="return 0;")
+        assert "[[nodiscard]] U32 f();" in d.render_hpp()
+
+    def test_a_member_function_takes_them(self) -> None:
+        d = doc()
+        with d.class_("C") as cls:
+            cls.function("f", attributes="[[nodiscard]]", ret="U32", body="return 0;")
+        assert "[[nodiscard]] U32 f();" in d.render_hpp()
+
+    def test_an_exported_class_keeps_its_qualified_definitions_clean(self) -> None:
+        # The whole point of a separate field: the name stays usable everywhere.
+        d = doc()
+        d.include("T.hpp", output=Output.CPP)
+        with d.class_("C", attributes=self.VISIBLE) as cls:
+            with cls.public():
+                cls.constructor(body="")
+                cls.destructor(body="")
+                cls.function("f", ret="int", body="return 0;")
+        cpp = d.render_cpp()
+        assert self.VISIBLE not in cpp
+        assert_compiles(d.files())
+
+
+class TestDocumentWriters:
+    """``CppDocBuilder`` takes writers document-wide, like it takes a formatter."""
+
+    def test_a_document_wide_writer_reaches_render(self) -> None:
+        d = doc(hpp_writer=MarkedHpp())
+        d.class_("C")
+        assert "// MARKED" in d.render_hpp()
+
+    def test_a_document_wide_writer_reaches_files(self) -> None:
+        d = doc(hpp_writer=MarkedHpp())
+        d.class_("C")
+        assert "// MARKED" in d.files()["T.hpp"]
+
+    def test_a_document_wide_writer_reaches_write(self, tmp_path: Path) -> None:
+        d = doc(hpp_writer=MarkedHpp())
+        d.class_("C")
+        d.write(tmp_path)
+        assert "// MARKED" in (tmp_path / "T.hpp").read_text()
+
+    def test_a_call_can_override_the_document_writer(self) -> None:
+        d = doc()
+        d.class_("C")
+        assert "// MARKED" in d.render_hpp(writer=MarkedHpp())
+
+    def test_a_writer_subclass_keeps_the_skip_unchanged_behaviour(
+        self, tmp_path: Path
+    ) -> None:
+        # The point of threading writers through: none of write()'s work is lost.
+        d = doc(hpp_writer=MarkedHpp())
+        d.class_("C")
+        d.write(tmp_path)
+        result = d.write(tmp_path)
+        assert result.written == []
+        assert len(result.unchanged) == 2
+
+
+class TestMarginEscapes:
+    """Text a generator derives from its input must not lose a leading marker."""
+
+    def test_scope_lines_strips_by_default(self) -> None:
+        d = doc()
+        d.lines("|using T = int;")
+        assert "using T = int;" in d.render_hpp()
+
+    def test_scope_lines_can_turn_stripping_off(self) -> None:
+        d = doc()
+        d.lines('|static const char* S = "|a";', margin=None)
+        assert '|static const char* S = "|a";' in d.render_hpp()
+
+    def test_a_comment_from_a_string_is_stripped(self) -> None:
+        d = doc()
+        d.class_("C", comment="|annotated")
+        assert "//! annotated" in d.render_hpp()
+
+    def test_a_comment_from_lines_is_not(self) -> None:
+        # What a generator does with an FPP annotation it must not truncate.
+        d = doc()
+        d.class_("C", comment=lines("|annotated", margin=None))
+        assert "//! |annotated" in d.render_hpp()
+
+    def test_a_multi_line_derived_comment_keeps_every_marker(self) -> None:
+        d = doc()
+        with d.class_("C") as cls:
+            cls.function("f", comment=lines("|a\n|b", margin=None), body="x();")
+        hpp = d.render_hpp()
+        assert "//! |a" in hpp and "//! |b" in hpp
+
+    def test_a_derived_param_comment_keeps_its_marker(self) -> None:
+        d = doc()
+        with d.class_("C") as cls:
+            fn = cls.function("f", body="x();")
+            fn.param("U32", "x", comment=lines("|the x", margin=None))
+        assert "//!< |the x" in d.render_hpp()
+
+    def test_a_derived_enum_comment_keeps_its_marker(self) -> None:
+        d = doc()
+        e = d.enum_class("E", underlying="U8")
+        e.constant("A", 0, comment=lines("|first", margin=None))
+        assert "//!< |first" in d.render_hpp()
+
+    def test_a_derived_variable_comment_keeps_its_marker(self) -> None:
+        d = doc()
+        d.var("U32", "x", init="0", constexpr=True, comment=[line("|note")])
+        assert "//! |note" in d.render_hpp()
+
+    def test_content_starting_with_a_hash_keeps_its_indentation(self) -> None:
+        # A docstring being bound to C++, indented inside a raw string literal.
+        d = doc()
+        with d.class_("C") as cls:
+            fn = cls.function("f", body='const char* s = R"(')
+            fn.body.line("# Heading")
+            fn.body.line(')";')
+        assert "  # Heading" in d.render_cpp()
 
 
 class TestValidation:

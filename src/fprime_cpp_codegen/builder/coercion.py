@@ -95,3 +95,14 @@ def _extends(extends: str | Sequence[str] | None) -> str | None:
         return extends
     joined = ", ".join(extends)
     return joined or None
+
+
+def _as_attributes(attributes: str | Sequence[str]) -> tuple[str, ...]:
+    """Normalise a declaration-attribute specification into a tuple.
+
+    A single string is one attribute, not a sequence of characters, since one is the
+    common case: ``attributes='__attribute__((visibility("default")))'``.
+    """
+    if isinstance(attributes, str):
+        return (attributes,)
+    return tuple(attributes)

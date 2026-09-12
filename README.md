@@ -77,6 +77,78 @@ create it, so you can keep filling it in afterwards. It is worth using on access
 sections and preprocessor guards, which delete themselves when nothing lands
 inside them.
 
+## Text that comes from your model
+
+Multi-line strings are margin-stripped: on each line, leading whitespace followed by
+a `|` is dropped, so a block of C++ can be indented to match the Python around it.
+That is convenient for literals written by hand and a hazard for text a generator
+derives from its input — an FPP annotation used as a doc comment, a C++ expression
+whose continuation line starts with `|`, would silently lose that character.
+
+Three escapes, in order of preference:
+
+```python
+doc.lines(expression, margin=None)          # no stripping at all
+body.line(expression)                       # one line, never stripped
+cls.function("f", comment=lines(text, margin=None))   # comments take Lines, too
+```
+
+Every `comment=` argument accepts either a string, which is stripped, or a
+`Sequence[Line]`, which is not. `Body.line()` and `Body.raw()` never strip;
+`Body.lines()` and the scope-level `lines()` take `margin=None`. Doubling the marker
+(`||x`) also works, since only the first one per line is removed.
+
+Separately, a line whose text begins with a recognised preprocessor directive —
+`#include`, `#if`, `#pragma` and the rest — is forced to column zero, wherever in the
+document it sits. Content that merely starts with `#`, such as a Markdown heading
+inside a C++ string literal, keeps its indentation. A real directive that has to keep
+its column carries the spaces in the text (`line("  #include <x>")`) rather than in
+the line's indent.
+
+## Extension points
+
+Declarations take attributes, which is what a shared object's exported symbols need.
+On a class they land between the keyword and the name, leaving the name — and so the
+constructor, the destructor and every `MyComp ::` qualifier — untouched:
+
+```python
+cls = ns.class_("MyComp", extends="public MyCompComponentBase",
+                attributes='__attribute__((visibility("default")))')
+cls.function("get", ret="U32", attributes="[[nodiscard]]", body="return m_v;")
+```
+
+A document does not have to be two files. `emit_hpp=False` gives a standalone
+translation unit — a `PYBIND11_MODULE` block with no header to declare — and
+`emit_cpp=False` a header-only one. Either way, anything the dropped file was the
+only home for raises a `ValidationError` naming it, rather than disappearing:
+
+```python
+doc = CppDocBuilder("MyCompModule", emit_hpp=False, strict=True)
+```
+
+`strict=True` additionally rejects a definition that needs a body and has none, which
+otherwise renders as an empty out-of-line definition — valid C++, and so easy for a
+generator to emit by accident. Say `declaration_only=True` for a header-only
+declaration, or `body=""` for a definition that is deliberately empty.
+`fprime_cpp_codegen.validation` reports both classes of problem without raising.
+
+To change how something renders, subclass `HppWriter` or `CppWriter` and pass the
+instance in. Every output path takes one, so overriding a single method costs you
+nothing else — `write()` keeps its directory creation, its unchanged-file mtime
+handling and its formatter:
+
+```python
+class GuardlessHpp(HppWriter):
+    def open_include_guard(self, guard: str) -> list[Line]:
+        return lines("#pragma once")
+
+    def close_include_guard(self) -> list[Line]:
+        return []
+
+doc = CppDocBuilder("MyComp", hpp_writer=GuardlessHpp())
+doc.write("build-artifacts")     # or pass writer= / hpp_writer= per call
+```
+
 ## Examples
 
 Run any of these to print the C++ they generate, or pass a directory to write it:

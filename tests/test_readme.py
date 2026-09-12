@@ -60,6 +60,65 @@ def test_quick_start_writes_where_it_says(tmp_path: Path, quick_start: Any) -> N
     assert (tmp_path / "build-artifacts" / "Ring.cpp").is_file()
 
 
+#: The blocks after the quick start are fragments, so they run against a prepared
+#: namespace rather than on their own.  The ``ClangFormat`` one is excluded: it shells
+#: out to a formatter the test environment need not have.
+FRAGMENT_BLOCKS = slice(2, None)
+
+
+@pytest.fixture
+def fragment_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The names the README's later snippets are written against."""
+    from fprime_cpp_codegen import Body, CppDocBuilder, HppWriter, Line, lines
+
+    monkeypatch.chdir(tmp_path)
+    doc = CppDocBuilder("Doc", description="a document")
+    ns = doc.namespace("Demo")
+    return {
+        "Body": Body,
+        "CppDocBuilder": CppDocBuilder,
+        "HppWriter": HppWriter,
+        "Line": Line,
+        "lines": lines,
+        "doc": doc,
+        "ns": ns,
+        "cls": ns.class_("C"),
+        "body": Body(),
+        # What a generator would have taken from its model: both begin with the
+        # margin marker, which is the whole point of the snippets.
+        "expression": "|a | b",
+        "text": "|an annotation",
+    }
+
+
+def test_the_documented_escapes_and_extension_points_run(
+    fragment_context: Any, tmp_path: Path
+) -> None:
+    """Every later snippet must execute, in order, against that namespace.
+
+    These document the escapes for margin stripping and the writer hook, so a
+    signature change that invalidates one of them has to fail here.
+    """
+    for snippet in blocks("python")[FRAGMENT_BLOCKS]:
+        exec(compile(snippet, "README.md", "exec"), fragment_context)  # noqa: S102
+    # The last snippet swaps the include guard for a pragma and writes the result.
+    written = (tmp_path / "build-artifacts" / "MyComp.hpp").read_text()
+    assert "#pragma once" in written
+    assert "#ifndef" not in written
+
+
+def test_the_derived_text_snippets_keep_their_margin_marker(
+    fragment_context: Any,
+) -> None:
+    """The escapes have to actually escape, not merely run."""
+    snippet = blocks("python")[2]
+    exec(compile(snippet, "README.md", "exec"), fragment_context)  # noqa: S102
+    doc = fragment_context["doc"]
+    assert "|a | b" in doc.render_hpp()
+    assert "//! |an annotation" in doc.render_hpp()
+    assert str(fragment_context["body"]) == "|a | b\n"
+
+
 def test_every_referenced_example_exists() -> None:
     """Every ``examples/...`` link in the README must point at a real file."""
     root = README.parent

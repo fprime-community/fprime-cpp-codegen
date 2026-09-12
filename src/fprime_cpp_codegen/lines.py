@@ -120,6 +120,11 @@ def strip_margin(s: str, margin: str = "|") -> str:
     character is ``margin``, it and everything before it are dropped.  A line with no
     margin marker is left untouched, including its leading whitespace -- so
     ``"x = a | b;"`` survives intact.
+
+    Only the first marker on a line is removed, so doubling it escapes it: a line of
+    text that really does start with ``|`` is written ``"||x"``.  Text derived from a
+    generator's input is better passed through :func:`lines` with ``margin=None``,
+    which does not strip at all.
     """
     out: list[str] = []
     for part in s.split("\n"):
@@ -148,13 +153,18 @@ def _split_lines(s: str) -> list[str]:
     return parts
 
 
-def lines(s: str) -> list[Line]:
+def lines(s: str, *, margin: str | None = "|") -> list[Line]:
     """Convert a (possibly margin-stripped, possibly multi-line) string to lines.
 
     ``lines("\\n|#ifndef X\\n|#define X")`` yields a leading blank line followed by the
     two directives.
+
+    ``margin=None`` disables :func:`strip_margin` entirely, which is what text coming
+    from a generator's input wants: an annotation or an expression beginning with the
+    margin character survives intact rather than losing its first character.
     """
-    return [Line(part) for part in _split_lines(strip_margin(s))]
+    stripped = s if margin is None else strip_margin(s, margin)
+    return [Line(part) for part in _split_lines(stripped)]
 
 
 def lines_opt(f: Callable[[_T], list[Line]], value: _T | None) -> list[Line]:

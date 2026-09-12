@@ -86,6 +86,33 @@ class TestStripMargin:
     def test_marker_only_line_becomes_empty(self) -> None:
         assert strip_margin("  |") == ""
 
+    def test_only_the_first_marker_goes_so_doubling_it_escapes(self) -> None:
+        assert strip_margin("||x") == "|x"
+
+    def test_the_marker_is_configurable(self) -> None:
+        assert strip_margin("  #x", margin="#") == "x"
+        assert strip_margin("  |x", margin="#") == "  |x"
+
+
+class TestLinesMargin:
+    """Text a generator derives from its input must survive a leading marker."""
+
+    def test_stripping_is_on_by_default(self) -> None:
+        assert lines("|x") == [Line("x")]
+
+    def test_margin_none_strips_nothing(self) -> None:
+        assert lines("|x") == [Line("x")]
+        assert lines("|x", margin=None) == [Line("|x")]
+
+    def test_margin_none_keeps_leading_whitespace_too(self) -> None:
+        assert lines("  |x", margin=None) == [Line("  |x")]
+
+    def test_margin_none_still_splits_on_newlines(self) -> None:
+        assert lines("|a\n|b", margin=None) == [Line("|a"), Line("|b")]
+
+    def test_the_marker_is_configurable(self) -> None:
+        assert lines("#x", margin="#") == [Line("x")]
+
 
 class TestLines:
     def test_leading_newline_yields_leading_blank(self) -> None:

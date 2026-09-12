@@ -2,6 +2,11 @@
 
 A class body, a namespace, and the document itself all share the member-adding
 vocabulary in :class:`_Scope`, and differ in what a member may be.
+
+The methods that add a definition -- :meth:`ClassBuilder.function`,
+:meth:`ClassBuilder.constructor` and the rest -- spell out the parameters of the
+builder they construct instead of forwarding ``**kwargs``, so an editor and a type
+checker can both see them.  ``tests/test_signatures.py`` holds the two in step.
 """
 
 from __future__ import annotations
@@ -10,18 +15,29 @@ from collections.abc import Generator, Iterable, Sequence
 from contextlib import contextmanager
 from typing import Any, Generic
 
+from ..body import Code
 from ..comments import (
     write_banner_comment,
     write_doxygen_comment,
     write_doxygen_comment_opt,
 )
-from ..doc import Class, Lines, Namespace, Output, Type, Variable, as_type
+from ..doc import (
+    Class,
+    Comment,
+    Lines,
+    Namespace,
+    Output,
+    Param,
+    Type,
+    Variable,
+    as_type,
+)
 from ..errors import ValidationError
 from ..lines import Line, blank
 from ..lines import line as _line
 from ..lines import lines as _lines
 from .base import _Builder, _DocContext, _resolve, _T, _T2
-from .coercion import _extends
+from .coercion import _as_attributes, _extends
 from .decoration import AccessSection, _Guard, _GuardClose, _GuardOpen
 from .definitions import (
     Radix,
@@ -87,15 +103,20 @@ class _Scope(_Builder[_T], Generic[_T]):
         self,
         text: str,
         *,
+        margin: str | None = "|",
         output: Output = Output.HPP,
         cpp_file: str | None = None,
     ) -> None:
-        """Append a margin-stripped, possibly multi-line block of C++ as a member."""
-        self.raw(_lines(text), output=output, cpp_file=cpp_file)
+        """Append a margin-stripped, possibly multi-line block of C++ as a member.
+
+        ``margin=None`` turns the stripping off, for text taken from a generator's
+        input that may legitimately begin with the margin character.
+        """
+        self.raw(_lines(text, margin=margin), output=output, cpp_file=cpp_file)
 
     def banner(
         self,
-        text: str,
+        text: Comment,
         *,
         output: Output = Output.BOTH,
         cpp_file: str | None = None,
@@ -107,7 +128,7 @@ class _Scope(_Builder[_T], Generic[_T]):
         """
         self.raw(write_banner_comment(text), output=output, cpp_file=cpp_file)
 
-    def doc_comment(self, text: str, *, output: Output = Output.HPP) -> None:
+    def doc_comment(self, text: Comment, *, output: Output = Output.HPP) -> None:
         """Append a standalone ``//!`` doxygen comment."""
         self.raw(write_doxygen_comment(text), output=output)
 
@@ -116,7 +137,7 @@ class _Scope(_Builder[_T], Generic[_T]):
         name: str,
         target: str,
         *,
-        comment: str | None = None,
+        comment: Comment | None = None,
         output: Output = Output.HPP,
     ) -> None:
         """Append a type alias: ``using <name> = <target>;``."""
@@ -131,7 +152,7 @@ class _Scope(_Builder[_T], Generic[_T]):
         self,
         name: str | None = None,
         *,
-        comment: str | None = None,
+        comment: Comment | None = None,
         output: Output = Output.HPP,
         radix: Radix = Radix.DECIMAL,
         trailing_comma: bool = True,
@@ -159,7 +180,7 @@ class _Scope(_Builder[_T], Generic[_T]):
         name: str,
         *,
         underlying: str | None = None,
-        comment: str | None = None,
+        comment: Comment | None = None,
         output: Output = Output.HPP,
         radix: Radix = Radix.DECIMAL,
         trailing_comma: bool = True,
@@ -187,7 +208,7 @@ class _Scope(_Builder[_T], Generic[_T]):
         *,
         init: str | None = None,
         array: str | None = None,
-        comment: str | None = None,
+        comment: Comment | None = None,
         static: bool = False,
         const: bool = False,
         constexpr: bool = False,
@@ -266,9 +287,10 @@ class ClassBuilder(_Scope[Class]):
         *,
         extends: str | Sequence[str] | None = None,
         final: bool = False,
-        comment: str | None = None,
+        comment: Comment | None = None,
         template: str | None = None,
         struct: bool = False,
+        attributes: str | Sequence[str] = (),
         ctx: _DocContext | None = None,
         type_qualifier: str = "",
     ) -> None:
@@ -287,6 +309,9 @@ class ClassBuilder(_Scope[Class]):
         self.comment = comment
         self.template = template
         self.struct = struct
+        self.attributes = _as_attributes(attributes)
+        """Declaration attributes, between the keyword and the name.  See
+        :attr:`fprime_cpp_codegen.doc.Class.attributes`."""
 
     @property
     def type(self) -> Type:
@@ -308,47 +333,194 @@ class ClassBuilder(_Scope[Class]):
 
     # -- access sections ---------------------------------------------
 
-    def public(self, comment: str | None = None) -> AccessSection:
+    def public(self, comment: Comment | None = None) -> AccessSection:
         """Start a ``public:`` section."""
         return AccessSection(self, "public", comment)
 
-    def protected(self, comment: str | None = None) -> AccessSection:
+    def protected(self, comment: Comment | None = None) -> AccessSection:
         """Start a ``protected:`` section."""
         return AccessSection(self, "protected", comment)
 
-    def private(self, comment: str | None = None) -> AccessSection:
+    def private(self, comment: Comment | None = None) -> AccessSection:
         """Start a ``private:`` section."""
         return AccessSection(self, "private", comment)
 
     # -- members ------------------------------------------------------
 
-    def constructor(self, **kwargs: Any) -> ConstructorBuilder:
-        """Add a constructor.  See :class:`ConstructorBuilder` for the arguments."""
-        kwargs.setdefault("cpp_file", self._ctx.cpp_file)
-        return self._add(ConstructorBuilder(**kwargs))
+    def constructor(
+        self,
+        *,
+        params: Iterable[Param | Sequence[str]] = (),
+        initializers: Iterable[str] = (),
+        comment: Comment | None = None,
+        body: Code = None,
+        explicit: bool = False,
+        constexpr: bool = False,
+        noexcept: bool = False,
+        deleted: bool = False,
+        defaulted: bool = False,
+        declaration_only: bool = False,
+        template: str | None = None,
+        inline_body: bool = False,
+        cpp_file: str | None = None,
+    ) -> ConstructorBuilder:
+        """Add a constructor.  See :class:`ConstructorBuilder`.
 
-    def destructor(self, **kwargs: Any) -> DestructorBuilder:
-        """Add a destructor.  See :class:`DestructorBuilder` for the arguments."""
-        kwargs.setdefault("cpp_file", self._ctx.cpp_file)
-        return self._add(DestructorBuilder(**kwargs))
+        ``cpp_file`` defaults to the enclosing :meth:`cpp_file` block's target, as it
+        does for every definition added to a scope.
+        """
+        return self._add(
+            ConstructorBuilder(
+                params=params,
+                initializers=initializers,
+                comment=comment,
+                body=body,
+                explicit=explicit,
+                constexpr=constexpr,
+                noexcept=noexcept,
+                deleted=deleted,
+                defaulted=defaulted,
+                declaration_only=declaration_only,
+                template=template,
+                inline_body=inline_body,
+                cpp_file=self._resolved_cpp_file(cpp_file),
+            )
+        )
 
-    def function(self, name: str, **kwargs: Any) -> FunctionBuilder:
-        """Add a member function.  See :class:`FunctionBuilder` for the arguments."""
-        kwargs.setdefault("cpp_file", self._ctx.cpp_file)
-        return self._add(FunctionBuilder(name, **kwargs))
+    def destructor(
+        self,
+        *,
+        comment: Comment | None = None,
+        body: Code = None,
+        virtual: bool = False,
+        override: bool = False,
+        noexcept: bool = False,
+        deleted: bool = False,
+        defaulted: bool = False,
+        declaration_only: bool = False,
+        inline_body: bool = False,
+        cpp_file: str | None = None,
+    ) -> DestructorBuilder:
+        """Add a destructor.  See :class:`DestructorBuilder`."""
+        return self._add(
+            DestructorBuilder(
+                comment=comment,
+                body=body,
+                virtual=virtual,
+                override=override,
+                noexcept=noexcept,
+                deleted=deleted,
+                defaulted=defaulted,
+                declaration_only=declaration_only,
+                inline_body=inline_body,
+                cpp_file=self._resolved_cpp_file(cpp_file),
+            )
+        )
 
-    def class_(self, name: str, **kwargs: Any) -> ClassBuilder:
-        """Add a nested class."""
-        kwargs.setdefault("ctx", self._ctx)
-        kwargs.setdefault("type_qualifier", self._type_qualifier)
-        return self._add(ClassBuilder(name, **kwargs))
+    def function(
+        self,
+        name: str,
+        *,
+        ret: Type | str = "void",
+        params: Iterable[Param | Sequence[str]] = (),
+        comment: Comment | None = None,
+        body: Code = None,
+        const: bool = False,
+        static: bool = False,
+        virtual: bool = False,
+        pure_virtual: bool = False,
+        override: bool = False,
+        final: bool = False,
+        constexpr: bool = False,
+        inline: bool = False,
+        noexcept: bool = False,
+        deleted: bool = False,
+        defaulted: bool = False,
+        declaration_only: bool = False,
+        attributes: str | Sequence[str] = (),
+        template: str | None = None,
+        inline_body: bool = False,
+        cpp_file: str | None = None,
+    ) -> FunctionBuilder:
+        """Add a member function.  See :class:`FunctionBuilder`."""
+        return self._add(
+            FunctionBuilder(
+                name,
+                ret=ret,
+                params=params,
+                comment=comment,
+                body=body,
+                const=const,
+                static=static,
+                virtual=virtual,
+                pure_virtual=pure_virtual,
+                override=override,
+                final=final,
+                constexpr=constexpr,
+                inline=inline,
+                noexcept=noexcept,
+                deleted=deleted,
+                defaulted=defaulted,
+                declaration_only=declaration_only,
+                attributes=attributes,
+                template=template,
+                inline_body=inline_body,
+                cpp_file=self._resolved_cpp_file(cpp_file),
+            )
+        )
 
-    def struct_(self, name: str, **kwargs: Any) -> ClassBuilder:
-        """Add a nested struct."""
-        kwargs["struct"] = True
-        return self.class_(name, **kwargs)
+    def class_(
+        self,
+        name: str,
+        *,
+        extends: str | Sequence[str] | None = None,
+        final: bool = False,
+        comment: Comment | None = None,
+        template: str | None = None,
+        struct: bool = False,
+        attributes: str | Sequence[str] = (),
+    ) -> ClassBuilder:
+        """Add a nested class.  See :class:`ClassBuilder`.
 
-    def friend(self, declaration: str, *, comment: str | None = None) -> None:
+        The nested class inherits this one's type qualifier, so a type it declares is
+        spelled ``Outer::Inner::T`` from a source file.
+        """
+        return self._add(
+            ClassBuilder(
+                name,
+                extends=extends,
+                final=final,
+                comment=comment,
+                template=template,
+                struct=struct,
+                attributes=attributes,
+                ctx=self._ctx,
+                type_qualifier=self._type_qualifier,
+            )
+        )
+
+    def struct_(
+        self,
+        name: str,
+        *,
+        extends: str | Sequence[str] | None = None,
+        final: bool = False,
+        comment: Comment | None = None,
+        template: str | None = None,
+        attributes: str | Sequence[str] = (),
+    ) -> ClassBuilder:
+        """Add a nested struct: :meth:`class_` with ``struct=True``."""
+        return self.class_(
+            name,
+            extends=extends,
+            final=final,
+            comment=comment,
+            template=template,
+            struct=True,
+            attributes=attributes,
+        )
+
+    def friend(self, declaration: str, *, comment: Comment | None = None) -> None:
         """Add a ``friend`` declaration, written verbatim after the keyword."""
         self.raw(
             [
@@ -366,6 +538,7 @@ class ClassBuilder(_Scope[Class]):
             final=self.final,
             template=self.template,
             struct=self.struct,
+            attributes=self.attributes,
         )
 
     def __enter__(self) -> ClassBuilder:
@@ -408,26 +581,99 @@ class _MemberScope(_Scope[_T], Generic[_T]):
             cpp_file=cpp_file,
         )
 
-    def class_(self, name: str, **kwargs: Any) -> ClassBuilder:
-        """Add a class."""
-        kwargs.setdefault("ctx", self._ctx)
-        return self._add(ClassBuilder(name, **kwargs))
+    def class_(
+        self,
+        name: str,
+        *,
+        extends: str | Sequence[str] | None = None,
+        final: bool = False,
+        comment: Comment | None = None,
+        template: str | None = None,
+        struct: bool = False,
+        attributes: str | Sequence[str] = (),
+    ) -> ClassBuilder:
+        """Add a class.  See :class:`ClassBuilder`."""
+        return self._add(
+            ClassBuilder(
+                name,
+                extends=extends,
+                final=final,
+                comment=comment,
+                template=template,
+                struct=struct,
+                attributes=attributes,
+                ctx=self._ctx,
+            )
+        )
 
-    def struct_(self, name: str, **kwargs: Any) -> ClassBuilder:
-        """Add a struct."""
-        kwargs["struct"] = True
-        return self.class_(name, **kwargs)
+    def struct_(
+        self,
+        name: str,
+        *,
+        extends: str | Sequence[str] | None = None,
+        final: bool = False,
+        comment: Comment | None = None,
+        template: str | None = None,
+        attributes: str | Sequence[str] = (),
+    ) -> ClassBuilder:
+        """Add a struct: :meth:`class_` with ``struct=True``."""
+        return self.class_(
+            name,
+            extends=extends,
+            final=final,
+            comment=comment,
+            template=template,
+            struct=True,
+            attributes=attributes,
+        )
 
-    def function(self, name: str, **kwargs: Any) -> FunctionBuilder:
-        """Add a free function.  The class-only qualifiers are rejected here."""
-        for bad in ("const", "virtual", "pure_virtual", "override", "final"):
-            if kwargs.get(bad):
-                raise ValidationError(
-                    f"{bad!r} only means something for a member function; "
-                    f"{name!r} is at namespace scope"
-                )
-        kwargs.setdefault("cpp_file", self._ctx.cpp_file)
-        return self._add(FunctionBuilder(name, **kwargs))
+    def function(
+        self,
+        name: str,
+        *,
+        ret: Type | str = "void",
+        params: Iterable[Param | Sequence[str]] = (),
+        comment: Comment | None = None,
+        body: Code = None,
+        static: bool = False,
+        constexpr: bool = False,
+        inline: bool = False,
+        noexcept: bool = False,
+        deleted: bool = False,
+        defaulted: bool = False,
+        declaration_only: bool = False,
+        attributes: str | Sequence[str] = (),
+        template: str | None = None,
+        inline_body: bool = False,
+        cpp_file: str | None = None,
+    ) -> FunctionBuilder:
+        """Add a free function.  See :class:`FunctionBuilder`.
+
+        ``const``, ``virtual``, ``pure_virtual``, ``override`` and ``final`` are
+        absent by design: none of them means anything at namespace scope, so passing
+        one is a :class:`TypeError` here rather than C++ that will not compile.  Use
+        ``static`` for internal linkage.
+        """
+        return self._add(
+            FunctionBuilder(
+                name,
+                ret=ret,
+                params=params,
+                comment=comment,
+                body=body,
+                static=static,
+                constexpr=constexpr,
+                inline=inline,
+                noexcept=noexcept,
+                deleted=deleted,
+                defaulted=defaulted,
+                declaration_only=declaration_only,
+                attributes=attributes,
+                template=template,
+                inline_body=inline_body,
+                cpp_file=self._resolved_cpp_file(cpp_file),
+            )
+        )
 
     def namespace(self, *names: str) -> NamespaceBuilder:
         """Add a namespace, or a chain of nested ones.
